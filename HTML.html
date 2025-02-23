@@ -1,0 +1,770 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>FPS with Sounds, Reload Animation, & Enhanced Abilities</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+        }
+        /* Overlay before entering the game */
+        #blocker {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0,0,0,0.5);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 10;
+        }
+        #instructions {
+            font-size: 36px;
+            color: white;
+            text-align: center;
+            cursor: pointer;
+        }
+        /* Crosshair at the center */
+        #crosshair {
+            position: fixed;
+            left: 50%;
+            top: 50%;
+            width: 20px;
+            height: 20px;
+            margin-left: -10px;
+            margin-top: -10px;
+            pointer-events: none;
+            z-index: 5;
+        }
+        #crosshair:before,
+        #crosshair:after {
+            content: "";
+            position: absolute;
+            background: white;
+        }
+        #crosshair:before {
+            left: 50%;
+            top: 0;
+            width: 2px;
+            height: 100%;
+            margin-left: -1px;
+        }
+        #crosshair:after {
+            top: 50%;
+            left: 0;
+            height: 2px;
+            width: 100%;
+            margin-top: -1px;
+        }
+        /* Player Health HUD (upper left) */
+        #playerHealthBarContainer {
+            position: fixed;
+            top: 10px;
+            left: 10px;
+            width: 200px;
+            height: 20px;
+            background-color: #444;
+            border: 2px solid white;
+            z-index: 20;
+        }
+        #playerHealthBar {
+            height: 100%;
+            background-color: green;
+            width: 100%;
+        }
+        /* Abilities HUD (bottom right) */
+        #abilitiesHUD {
+            position: fixed;
+            bottom: 10px;
+            right: 10px;
+            font-size: 20px;
+            color: white;
+            background: rgba(0, 0, 0, 0.5);
+            padding: 10px;
+            z-index: 20;
+        }
+        #abilitiesHUD div {
+            margin-bottom: 5px;
+        }
+    </style>
+</head>
+<body>
+<!-- Click-to-play overlay -->
+<div id="blocker">
+    <div id="instructions">
+        Click to Play<br>
+        (W, A, S, D = Move, Mouse = Look, Space = Jump,<br>
+        Hold Left Click = Fire Rifle, Right Click = Fire Rocket,<br>
+        Left Shift = Dash, R = Reload)
+    </div>
+</div>
+<!-- Crosshair -->
+<div id="crosshair"></div>
+<!-- Player Health HUD (upper left) -->
+<div id="playerHealthBarContainer">
+    <div id="playerHealthBar"></div>
+</div>
+<!-- Abilities HUD (bottom right) -->
+<div id="abilitiesHUD">
+    <div id="autoDisplay">Auto Gun: 50/50</div>
+    <div id="rocketDisplay">Rocket: 5</div>
+    <div id="dashDisplay">Dash: Ready</div>
+</div>
+
+<!-- Three.js and PointerLockControls from CDN -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/PointerLockControls.js"></script>
+
+<script>
+    // --- SOUND SETUP ---
+    // Replace these URLs with your own sound file URLs if desired.
+    const shootSound = new Audio('https://www.soundjay.com/mechanical/sounds/mechanical-weapon-fire-01.mp3');
+    const reloadSound = new Audio('https://www.soundjay.com/button/sounds/button-09.mp3');
+
+    // --- GLOBAL VARIABLES ---
+    let camera, scene, renderer, controls;
+    let enemies = [];         // Enemies (with health and shooting behavior)
+    let rockets = [];         // Rockets fired by the player
+    let enemyBullets = [];    // Bullets fired by enemies
+    let mapObjects = [];      // Buildings, cars, etc.
+    let raycaster;
+
+    // Player movement state
+    let moveForward = false, moveBackward = false, moveLeft = false, moveRight = false;
+    let velocity = new THREE.Vector3();
+    let direction = new THREE.Vector3();
+    const clock = new THREE.Clock();
+
+    // Jump settings
+    let jumpCount = 0;
+    const jumpVelocity = 350;
+    const floorLevel = 10;
+
+    // Player health
+    let playerHealth = 100;
+    const maxPlayerHealth = 100;
+
+    // Auto gun settings
+    let shooting = false;
+    let lastShotTime = 0;
+    const shotInterval = 0.1;  // seconds per shot
+    let currentBullets = 50;
+    const magazineCapacity = 50;
+
+    // Rocket launcher settings
+    let rocketShots = 5;
+    const rocketMagazine = 5;
+    const rocketCooldown = 8;  // seconds cooldown after 5 shots
+    let rocketCooldownTimer = 0;
+    const rocketSpeed = 1000;
+    const rocketLifetimeMax = 2;
+    const explosionRadius = 50;
+    const rocketDamage = 40;   // Each rocket deals 40 damage per enemy hit in AOE
+    const rocketJumpImpulse = 600;
+
+    // Dash settings
+    let dashActive = false, dashAvailable = true;
+    let dashTimer = 0, dashCooldownTimer = 0;
+    const dashDuration = 0.2;  // seconds
+    const dashCooldown = 5;    // seconds
+    const dashSpeed = 1000;    // DASH SPEED (previously missing)
+    let dashDirection = new THREE.Vector3();
+    let dashKillOccurred = false;
+
+    // Reload state for auto gun
+    let reloading = false;
+
+    // We'll store a reference to the rifle mesh to animate it during reload.
+    let rifle;
+
+    init();
+    animate();
+
+    function init() {
+        // Set up camera.
+        camera = new THREE.PerspectiveCamera(75, window.innerWidth/window.innerHeight, 1, 1000);
+
+        // Create scene.
+        scene = new THREE.Scene();
+        scene.background = new THREE.Color(0xaaaaaa);
+        scene.fog = new THREE.Fog(0xffffff, 0, 750);
+
+        // Add hemisphere light.
+        const light = new THREE.HemisphereLight(0xeeeeff, 0x777788, 0.75);
+        light.position.set(0.5, 1, 0.75);
+        scene.add(light);
+
+        // Create the floor.
+        const floorGeometry = new THREE.PlaneGeometry(2000, 2000, 100, 100);
+        floorGeometry.rotateX(-Math.PI/2);
+        const floorMaterial = new THREE.MeshBasicMaterial({ color: 0x007700, wireframe: true });
+        const floorMesh = new THREE.Mesh(floorGeometry, floorMaterial);
+        scene.add(floorMesh);
+
+        // Create the map environment (buildings and cars).
+        createMap();
+
+        // Set up Pointer Lock Controls.
+        controls = new THREE.PointerLockControls(camera, document.body);
+        scene.add(controls.getObject());
+        // Set the player's spawn to a safe location.
+        controls.getObject().position.set(400, floorLevel, 400);
+
+        // Overlay behavior.
+        const blocker = document.getElementById("blocker");
+        const instructions = document.getElementById("instructions");
+        instructions.addEventListener("click", () => { controls.lock(); }, false);
+        controls.addEventListener("lock", () => { blocker.style.display = "none"; });
+        controls.addEventListener("unlock", () => { blocker.style.display = "flex"; });
+        document.addEventListener("pointerlockchange", () => {
+            if (document.pointerLockElement === document.body) { blocker.style.display = "none"; }
+            else { blocker.style.display = "flex"; }
+        }, false);
+
+        // Disable context menu so right-click fires rockets.
+        document.addEventListener("contextmenu", e => { e.preventDefault(); }, false);
+
+        // Add a simple rifle model to the camera and store its reference.
+        const rifleGeometry = new THREE.BoxGeometry(0.5, 0.2, 2);
+        const rifleMaterial = new THREE.MeshLambertMaterial({ color: 0x333333 });
+        rifle = new THREE.Mesh(rifleGeometry, rifleMaterial);
+        rifle.position.set(0.5, -0.5, -2);
+        camera.add(rifle);
+
+        // Create enemies ("people") with healthbars.
+        for (let i = 0; i < 20; i++) {
+            const enemy = createEnemy();
+            scene.add(enemy.group);
+            enemies.push(enemy);
+        }
+
+        // Set up the raycaster for hitscan firing.
+        raycaster = new THREE.Raycaster();
+
+        // Set up the renderer.
+        renderer = new THREE.WebGLRenderer();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.body.appendChild(renderer.domElement);
+
+        // Event listeners.
+        document.addEventListener("keydown", onKeyDown, false);
+        document.addEventListener("keyup", onKeyUp, false);
+        document.addEventListener("mousedown", onMouseDown, false);
+        document.addEventListener("mouseup", onMouseUp, false);
+        window.addEventListener("resize", onWindowResize, false);
+    }
+
+    // Creates bigger buildings and cars.
+    function createMap() {
+        // --- Buildings ---
+        const buildingGeometry = new THREE.BoxGeometry(100, 200, 100);
+        const buildingMaterial = new THREE.MeshLambertMaterial({ color: 0x888888 });
+        const buildingPositions = [
+            { x: -300, z: -300 },
+            { x: 300, z: -200 },
+            { x: -250, z: 300 },
+            { x: 250, z: 300 },
+            { x: 0, z: 0 }
+        ];
+        buildingPositions.forEach(pos => {
+            const building = new THREE.Mesh(buildingGeometry, buildingMaterial);
+            building.position.set(pos.x, 100, pos.z);
+            scene.add(building);
+            mapObjects.push(building);
+        });
+
+        // --- Cars ---
+        function createCar(x, z) {
+            const carGroup = new THREE.Group();
+            const carBodyGeometry = new THREE.BoxGeometry(20, 8, 40);
+            const carBodyMaterial = new THREE.MeshLambertMaterial({ color: 0x0000ff });
+            const carBody = new THREE.Mesh(carBodyGeometry, carBodyMaterial);
+            carBody.position.y = 4;
+            carGroup.add(carBody);
+
+            const wheelGeometry = new THREE.CylinderGeometry(2, 2, 1, 12);
+            const wheelMaterial = new THREE.MeshLambertMaterial({ color: 0x222222 });
+            for (let i = 0; i < 4; i++) {
+                const wheel = new THREE.Mesh(wheelGeometry, wheelMaterial);
+                wheel.rotation.z = Math.PI/2;
+                const offsetX = (i % 2 === 0) ? -6 : 6;
+                const offsetZ = (i < 2) ? -14 : 14;
+                wheel.position.set(offsetX, 2, offsetZ);
+                carGroup.add(wheel);
+            }
+            carGroup.position.set(x, 0, z);
+            scene.add(carGroup);
+            mapObjects.push(carGroup);
+        }
+        createCar(-150, -100);
+        createCar(100, 200);
+        createCar(200, -150);
+    }
+
+    // Creates an enemy "person" with a healthbar.
+    function createEnemy() {
+        const enemyGroup = new THREE.Group();
+        const bodyGeometry = new THREE.CylinderGeometry(2, 2, 10, 8);
+        const bodyMaterial = new THREE.MeshLambertMaterial({ color: 0xff0000 });
+        const body = new THREE.Mesh(bodyGeometry, bodyMaterial);
+        body.position.y = 5;
+        enemyGroup.add(body);
+        const headGeometry = new THREE.SphereGeometry(3, 8, 8);
+        const headMaterial = new THREE.MeshLambertMaterial({ color: 0xff0000 });
+        const head = new THREE.Mesh(headGeometry, headMaterial);
+        head.position.y = 13;
+        enemyGroup.add(head);
+        // Healthbar.
+        const healthBarGeometry = new THREE.PlaneGeometry(10, 1);
+        const healthBarMaterial = new THREE.MeshBasicMaterial({ color: 0x00ff00, side: THREE.DoubleSide });
+        const healthBar = new THREE.Mesh(healthBarGeometry, healthBarMaterial);
+        healthBar.position.set(0, 18, 0);
+        enemyGroup.add(healthBar);
+
+        const maxHealth = 100;
+        const health = maxHealth;
+
+        enemyGroup.position.x = (Math.random() * 400) - 200;
+        enemyGroup.position.z = (Math.random() * 400) - 200;
+        enemyGroup.position.y = floorLevel;
+
+        const enemyVelocity = new THREE.Vector3(
+            (Math.random()-0.5)*50,
+            0,
+            (Math.random()-0.5)*50
+        );
+
+        // Shooting properties.
+        const shootTimer = 0;
+        const shootInterval = 2 + Math.random()*3;
+        return {
+            group: enemyGroup,
+            velocity: enemyVelocity,
+            health: health,
+            maxHealth: maxHealth,
+            healthBar: healthBar,
+            shootTimer: shootTimer,
+            shootInterval: shootInterval
+        };
+    }
+
+    function onWindowResize() {
+        camera.aspect = window.innerWidth/window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+    }
+
+    function onKeyDown(event) {
+        switch (event.code) {
+            case "ArrowUp":
+            case "KeyW":
+                moveForward = true;
+                break;
+            case "ArrowLeft":
+            case "KeyA":
+                moveLeft = true;
+                break;
+            case "ArrowDown":
+            case "KeyS":
+                moveBackward = true;
+                break;
+            case "ArrowRight":
+            case "KeyD":
+                moveRight = true;
+                break;
+            case "Space":
+                if (jumpCount < 2) {
+                    velocity.y = jumpVelocity;
+                    jumpCount++;
+                }
+                break;
+            case "ShiftLeft":
+                if (dashAvailable && !dashActive) {
+                    dashActive = true;
+                    dashTimer = dashDuration;
+                    dashDirection.copy(camera.getWorldDirection(new THREE.Vector3())).setY(0).normalize();
+                    dashAvailable = false;
+                    dashKillOccurred = false;
+                    dashCooldownTimer = dashCooldown;
+                }
+                break;
+            case "KeyR":
+                // If not already reloading, start a 0.5-second reload.
+                if (!reloading) {
+                    reloading = true;
+                    reloadSound.currentTime = 0;
+                    reloadSound.play();
+                    // Simple reload animation: tilt the rifle downward.
+                    const initialRotation = rifle.rotation.x;
+                    rifle.rotation.x = -Math.PI/4;
+                    setTimeout(() => {
+                        rifle.rotation.x = initialRotation;
+                        currentBullets = magazineCapacity;
+                        reloading = false;
+                    }, 500);
+                }
+                break;
+        }
+    }
+
+    function onKeyUp(event) {
+        switch (event.code) {
+            case "ArrowUp":
+            case "KeyW":
+                moveForward = false;
+                break;
+            case "ArrowLeft":
+            case "KeyA":
+                moveLeft = false;
+                break;
+            case "ArrowDown":
+            case "KeyS":
+                moveBackward = false;
+                break;
+            case "ArrowRight":
+            case "KeyD":
+                moveRight = false;
+                break;
+        }
+    }
+
+    // Left-click fires auto gun; right-click fires a rocket.
+    function onMouseDown(event) {
+        if (!controls.isLocked) return;
+        if (event.button === 0) {
+            if (!reloading) shooting = true;
+        } else if (event.button === 2) {
+            if (rocketCooldownTimer <= 0 && rocketShots > 0) {
+                spawnRocket();
+                rocketShots--;
+                if (rocketShots === 0) {
+                    rocketCooldownTimer = rocketCooldown;
+                }
+            }
+        }
+    }
+
+    function onMouseUp(event) {
+        if (event.button === 0) {
+            shooting = false;
+        }
+    }
+
+    // Fires a hitscan bullet (auto gun) that creates a tracer and damages enemies.
+    function fireBullet() {
+        if (currentBullets <= 0) return;
+        currentBullets--;
+        // Play shooting sound.
+        shootSound.currentTime = 0;
+        shootSound.play();
+
+        const origin = new THREE.Vector3();
+        camera.getWorldPosition(origin);
+        const camDir = new THREE.Vector3();
+        camera.getWorldDirection(camDir);
+        raycaster.setFromCamera(new THREE.Vector2(0,0), camera);
+        const enemyGroups = enemies.map(e => e.group);
+        const intersects = raycaster.intersectObjects(enemyGroups, true);
+
+        let hitPoint;
+        if (intersects.length > 0) {
+            hitPoint = intersects[0].point;
+            const hit = intersects[0].object;
+            for (let i = enemies.length - 1; i >= 0; i--) {
+                const enemy = enemies[i];
+                if (enemy.group === hit.parent || enemy.group === hit || enemy.group.children.indexOf(hit) !== -1) {
+                    const damage = 25;
+                    enemy.health -= damage;
+                    enemy.health = Math.max(enemy.health, 0);
+                    const healthPercent = enemy.health / enemy.maxHealth;
+                    enemy.healthBar.scale.x = healthPercent;
+                    if (healthPercent > 0.5) enemy.healthBar.material.color.set(0x00ff00);
+                    else if (healthPercent > 0.2) enemy.healthBar.material.color.set(0xffff00);
+                    else enemy.healthBar.material.color.set(0xff0000);
+                    if (enemy.health <= 0) {
+                        scene.remove(enemy.group);
+                        enemies.splice(i, 1);
+                    }
+                    break;
+                }
+            }
+        } else {
+            hitPoint = origin.clone().add(camDir.clone().multiplyScalar(1000));
+        }
+
+        const tracerMaterial = new THREE.LineBasicMaterial({ color: 0xffff00 });
+        const tracerGeometry = new THREE.BufferGeometry().setFromPoints([origin, hitPoint]);
+        const tracerLine = new THREE.Line(tracerGeometry, tracerMaterial);
+        scene.add(tracerLine);
+        setTimeout(() => { scene.remove(tracerLine); }, 100);
+    }
+
+    // Spawns a rocket.
+    function spawnRocket() {
+        const rocketGeometry = new THREE.SphereGeometry(2, 8, 8);
+        const rocketMaterial = new THREE.MeshLambertMaterial({ color: 0xffaa00 });
+        const rocketMesh = new THREE.Mesh(rocketGeometry, rocketMaterial);
+        const camPosition = new THREE.Vector3();
+        camera.getWorldPosition(camPosition);
+        const camDirection = new THREE.Vector3();
+        camera.getWorldDirection(camDirection);
+        const offset = camDirection.clone().multiplyScalar(5);
+        rocketMesh.position.copy(camPosition).add(offset);
+        const rocketVelocity = camDirection.clone().multiplyScalar(rocketSpeed);
+        const rocket = { mesh: rocketMesh, velocity: rocketVelocity, lifetime: 0 };
+        scene.add(rocketMesh);
+        rockets.push(rocket);
+    }
+
+    // Explodes a rocket: deals 40 damage per enemy in range and applies a rocket jump impulse.
+    function explodeRocket(rocket) {
+        const explosionCenter = rocket.mesh.position;
+        for (let i = enemies.length - 1; i >= 0; i--) {
+            if (explosionCenter.distanceTo(enemies[i].group.position) < explosionRadius) {
+                const enemy = enemies[i];
+                enemy.health -= rocketDamage;
+                enemy.health = Math.max(enemy.health, 0);
+                const healthPercent = enemy.health / enemy.maxHealth;
+                enemy.healthBar.scale.x = healthPercent;
+                if (healthPercent > 0.5) enemy.healthBar.material.color.set(0x00ff00);
+                else if (healthPercent > 0.2) enemy.healthBar.material.color.set(0xffff00);
+                else enemy.healthBar.material.color.set(0xff0000);
+                if (enemy.health <= 0) {
+                    scene.remove(enemy.group);
+                    enemies.splice(i, 1);
+                }
+            }
+        }
+        const player = controls.getObject();
+        if (explosionCenter.distanceTo(player.position) < explosionRadius) {
+            velocity.y += rocketJumpImpulse;
+        }
+        scene.remove(rocket.mesh);
+    }
+
+    // Enemy shooting: enemy fires a bullet toward the player.
+    function enemyShoot(enemy) {
+        const bulletGeometry = new THREE.SphereGeometry(1, 8, 8);
+        const bulletMaterial = new THREE.MeshBasicMaterial({ color: 0xff0000 });
+        const bulletMesh = new THREE.Mesh(bulletGeometry, bulletMaterial);
+        const startPos = enemy.group.position.clone();
+        startPos.y += 10;
+        bulletMesh.position.copy(startPos);
+        const playerPos = controls.getObject().position.clone();
+        const directionToPlayer = new THREE.Vector3().subVectors(playerPos, startPos).normalize();
+        const bulletSpeed = 400;
+        const bulletVelocity = directionToPlayer.multiplyScalar(bulletSpeed);
+        const bullet = { mesh: bulletMesh, velocity: bulletVelocity, lifetime: 0 };
+        enemyBullets.push(bullet);
+        scene.add(bulletMesh);
+    }
+
+    function animate() {
+        requestAnimationFrame(animate);
+        const delta = clock.getDelta();
+        const elapsed = clock.getElapsedTime();
+        const player = controls.getObject();
+        const prevX = player.position.x;
+        const prevZ = player.position.z;
+
+        // --- Player Movement ---
+        velocity.x -= velocity.x * 10.0 * delta;
+        velocity.z -= velocity.z * 10.0 * delta;
+        velocity.y -= 9.8 * 100.0 * delta;
+        direction.z = Number(moveForward) - Number(moveBackward);
+        direction.x = Number(moveRight) - Number(moveLeft);
+        direction.normalize();
+        if (moveForward || moveBackward) {
+            velocity.z -= direction.z * 1200.0 * delta;
+        }
+        if (moveLeft || moveRight) {
+            velocity.x -= direction.x * 1200.0 * delta;
+        }
+        controls.moveRight(-velocity.x * delta);
+        controls.moveForward(-velocity.z * delta);
+        player.position.y += velocity.y * delta;
+        if (player.position.y < floorLevel) {
+            player.position.y = floorLevel;
+            velocity.y = 0;
+            jumpCount = 0;
+        }
+
+        // --- Collision Detection with Map Objects ---
+        for (let i = 0; i < mapObjects.length; i++) {
+            let bbox = new THREE.Box3().setFromObject(mapObjects[i]).expandByScalar(5);
+            if (bbox.containsPoint(player.position)) {
+                player.position.x = prevX;
+                player.position.z = prevZ;
+                velocity.x = 0;
+                velocity.z = 0;
+                break;
+            }
+        }
+
+        // --- Dash Update (Left Shift) ---
+        if (dashActive) {
+            let dashDisplacement = dashDirection.clone().multiplyScalar(dashSpeed * delta);
+            player.position.add(dashDisplacement);
+            enemies.forEach(enemy => {
+                if (player.position.distanceTo(enemy.group.position) < 10) {
+                    let dashDamage = enemy.maxHealth * 0.5;
+                    enemy.health -= dashDamage;
+                    enemy.health = Math.max(enemy.health, 0);
+                    let healthPercent = enemy.health / enemy.maxHealth;
+                    enemy.healthBar.scale.x = healthPercent;
+                    if (healthPercent > 0.5) enemy.healthBar.material.color.set(0x00ff00);
+                    else if (healthPercent > 0.2) enemy.healthBar.material.color.set(0xffff00);
+                    else enemy.healthBar.material.color.set(0xff0000);
+                    if (enemy.health <= 0) {
+                        scene.remove(enemy.group);
+                        enemies.splice(enemies.indexOf(enemy), 1);
+                        dashKillOccurred = true;
+                    }
+                }
+            });
+            dashTimer -= delta;
+            if (dashTimer <= 0) {
+                dashActive = false;
+                if (dashKillOccurred) {
+                    dashCooldownTimer = 0;
+                    dashAvailable = true;
+                }
+            }
+        } else {
+            if (!dashAvailable) {
+                dashCooldownTimer -= delta;
+                if (dashCooldownTimer <= 0) dashAvailable = true;
+            }
+        }
+
+        // --- Auto Gun Firing (Left Click) ---
+        if (shooting && (elapsed - lastShotTime >= shotInterval) && !reloading) {
+            lastShotTime = elapsed;
+            fireBullet();
+        }
+
+        // --- Update Rockets (Right Click Fire) ---
+        for (let i = rockets.length - 1; i >= 0; i--) {
+            const rocket = rockets[i];
+            rocket.lifetime += delta;
+            rocket.mesh.position.add(rocket.velocity.clone().multiplyScalar(delta));
+            let exploded = false;
+            if (rocket.lifetime > rocketLifetimeMax) { exploded = true; }
+            if (rocket.mesh.position.y <= floorLevel + 5) { exploded = true; }
+            for (let j = 0; j < enemies.length; j++) {
+                if (rocket.mesh.position.distanceTo(enemies[j].group.position) < explosionRadius) {
+                    exploded = true;
+                    break;
+                }
+            }
+            if (exploded) {
+                explodeRocket(rocket);
+                rockets.splice(i, 1);
+            }
+        }
+
+        // --- Update Rocket Launcher Cooldown ---
+        if (rocketCooldownTimer > 0) {
+            rocketCooldownTimer -= delta;
+            if (rocketCooldownTimer <= 0) {
+                rocketCooldownTimer = 0;
+                rocketShots = rocketMagazine;
+            }
+        }
+
+        // --- Update Enemy Bullets ---
+        for (let i = enemyBullets.length - 1; i >= 0; i--) {
+            const bullet = enemyBullets[i];
+            bullet.lifetime += delta;
+            bullet.mesh.position.add(bullet.velocity.clone().multiplyScalar(delta));
+            const playerPos = controls.getObject().position.clone();
+            if (bullet.mesh.position.distanceTo(playerPos) < 5) {
+                playerHealth -= 10;
+                scene.remove(bullet.mesh);
+                enemyBullets.splice(i, 1);
+                if (playerHealth <= 0) {
+                    alert("Game Over!");
+                    document.location.reload();
+                }
+                continue;
+            }
+            if (bullet.lifetime > 3) {
+                scene.remove(bullet.mesh);
+                enemyBullets.splice(i, 1);
+            }
+        }
+
+        // --- Update Enemy Movement, Shooting, & Healthbar Orientation ---
+        enemies.forEach(enemy => {
+            enemy.group.position.add(enemy.velocity.clone().multiplyScalar(delta));
+            if (enemy.group.position.x < -200 || enemy.group.position.x > 200) {
+                enemy.velocity.x = -enemy.velocity.x;
+            }
+            if (enemy.group.position.z < -200 || enemy.group.position.z > 200) {
+                enemy.velocity.z = -enemy.velocity.z;
+            }
+            enemy.healthBar.lookAt(camera.position);
+            enemy.shootTimer += delta;
+            if (enemy.shootTimer >= enemy.shootInterval) {
+                enemyShoot(enemy);
+                enemy.shootTimer = 0;
+                enemy.shootInterval = 2 + Math.random() * 3;
+            }
+        });
+
+        // --- Update HUD ---
+        // Auto gun ammo HUD.
+        document.getElementById("autoDisplay").innerText = "Auto Gun: " + currentBullets + "/" + magazineCapacity;
+        // Rocket launcher HUD.
+        if (rocketCooldownTimer > 0) {
+            document.getElementById("rocketDisplay").innerText = "Rocket: CD: " + rocketCooldownTimer.toFixed(1) + "s";
+        } else {
+            document.getElementById("rocketDisplay").innerText = "Rocket: " + rocketShots + "/" + rocketMagazine;
+        }
+        // Dash HUD.
+        if (dashAvailable) {
+            document.getElementById("dashDisplay").innerText = "Dash: Ready";
+        } else {
+            document.getElementById("dashDisplay").innerText = "Dash: CD: " + dashCooldownTimer.toFixed(1) + "s";
+        }
+
+        // --- Update Player Health HUD ---
+        const healthBar = document.getElementById("playerHealthBar");
+        const healthPercent = playerHealth / maxPlayerHealth;
+        healthBar.style.width = (healthPercent * 200) + "px";
+        if (healthPercent > 0.5) healthBar.style.backgroundColor = "green";
+        else if (healthPercent > 0.2) healthBar.style.backgroundColor = "yellow";
+        else healthBar.style.backgroundColor = "red";
+
+        renderer.render(scene, camera);
+    }
+
+    // Enemy shooting: each enemy fires a bullet toward the player.
+    function enemyShoot(enemy) {
+        const bulletGeometry = new THREE.SphereGeometry(1, 8, 8);
+        const bulletMaterial = new THREE.MeshBasicMaterial({ color: 0xff0000 });
+        const bulletMesh = new THREE.Mesh(bulletGeometry, bulletMaterial);
+        const startPos = enemy.group.position.clone();
+        startPos.y += 10;
+        bulletMesh.position.copy(startPos);
+        const playerPos = controls.getObject().position.clone();
+        const directionToPlayer = new THREE.Vector3().subVectors(playerPos, startPos).normalize();
+        const bulletSpeed = 400;
+        const bulletVelocity = directionToPlayer.multiplyScalar(bulletSpeed);
+        const bullet = { mesh: bulletMesh, velocity: bulletVelocity, lifetime: 0 };
+        enemyBullets.push(bullet);
+        scene.add(bulletMesh);
+    }
+
+    // Reload auto gun when R is pressed (handled in onKeyDown).
+    document.addEventListener("keydown", function(event) {
+        if (event.code === "KeyR" && !reloading) {
+            // Already handled above in onKeyDown.
+        }
+    });
+</script>
+</body>
+</html>
